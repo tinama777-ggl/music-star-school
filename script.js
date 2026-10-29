@@ -3,14 +3,15 @@ const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid=()=>crypto.randomUUID();
 const localDate=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const today=localDate(new Date());
+const today=new Intl.DateTimeFormat('en-CA',{timeZone:'Pacific/Auckland',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 const money=n=>new Intl.NumberFormat('en-NZ',{style:'currency',currency:'NZD'}).format(n);
 const instruments=['Piano','Violin','Cello','Flute'];
-const seed={teachers:[{id:'t1',name:'Sophia Lee',instrument:'Piano',rate:45,email:'sophia@example.com'},{id:'t2',name:'Daniel Park',instrument:'Violin',rate:48,email:'daniel@example.com'},{id:'t3',name:'Ava Brooks',instrument:'Cello',rate:50,email:'ava@example.com'},{id:'t4',name:'Liam Chen',instrument:'Flute',rate:42,email:'liam@example.com'}],students:[{id:'s1',name:'Ella Stone',teacher:'t1',parent:'Maria Stone',email:'maria@example.com',level:'Grade 3'},{id:'s2',name:'Noah James',teacher:'t2',parent:'Alex James',email:'alex@example.com',level:'Beginner'},{id:'s3',name:'Mia Larkin',teacher:'t3',parent:'Sarah Larkin',email:'sarah@example.com',level:'Grade 4'},{id:'s4',name:'Zoe Hales',teacher:'t4',parent:'Olivia Hales',email:'olivia@example.com',level:'Grade 2'},{id:'s5',name:'Oliver Reed',teacher:'t1',parent:'James Reed',email:'james@example.com',level:'Grade 1'},{id:'s6',name:'Lucas Turner',teacher:'t2',parent:'Emma Turner',email:'emma@example.com',level:'Grade 3'}],lessons:[],invoices:[]};
-seed.lessons=seed.students.map((s,i)=>({id:'l'+i,student:s.id,date:today,time:['09:00','10:00','11:00','13:00','14:00','15:00'][i],duration:i%2?45:60,room:'Studio '+String.fromCharCode(65+i%4),status:i<2?'Completed':'Scheduled'}));
-seed.invoices=[{id:'INV-1001',student:'s1',teacher:'t1',studentName:'Ella Stone',parent:'Maria Stone',email:'maria@example.com',amount:180,description:'4 piano lessons',due:today,status:'Pending'},{id:'INV-1002',student:'s2',teacher:'t2',studentName:'Noah James',parent:'Alex James',email:'alex@example.com',amount:160,description:'4 violin lessons',due:today,status:'Paid'}];
-let db;try{db=JSON.parse(localStorage.getItem('musicstar-v2'))||structuredClone(seed)}catch{db=structuredClone(seed)}
-let session='director',page='overview',filter='today',query='',teacherFilter='all',editKind='',editId=null,toastTimer;
+const emptyDatabase=()=>({teachers:[],students:[],lessons:[],invoices:[],rates:[],profiles:[]});
+let db=emptyDatabase();
+let session=null,page='overview',filter='today',query='',teacherFilter='all',editKind='',editId=null,toastTimer;
+let account=null,authenticatedUser=null,ready=false,loadVersion=0,writeBusy=false;
+const service=window.MusicStarData;
+let recovering=Boolean(window.MUSIC_STAR_RECOVERY),passwordBusy=false,authNotice='';
 let calendarDate = today;
 let calendarView = 'month';
 const director=()=>session==='director';
@@ -19,7 +20,10 @@ const student=id=>db.students.find(s=>s.id===id);
 const visibleStudents=()=>db.students.filter(s=>director()||s.teacher===session);
 const visibleLessons=()=>db.lessons.filter(l=>visibleStudents().some(s=>s.id===l.student));
 const visibleInvoices=()=>db.invoices.filter(i=>director()||i.teacher===session);
-const hours=id=>db.lessons.filter(l=>student(l.student)?.teacher===id&&l.status==='Completed').reduce((n,l)=>n+l.duration/60,0);
+const hours=id=>db.lessons.filter(l=>(l.teacher||student(l.student)?.teacher)===id&&l.status==='Completed').reduce((n,l)=>n+l.duration/60,0);
+const lessonRate=l=>db.rates.filter(r=>r.teacher_id===l.teacher&&r.effective_from<=l.date).sort((a,b)=>b.effective_from.localeCompare(a.effective_from))[0]?.hourly_rate;
+const salary=id=>db.lessons.filter(l=>l.teacher===id&&l.status==='Completed').reduce((n,l)=>n+l.duration/60*(lessonRate(l)??0),0);
+const missingRates=id=>db.lessons.filter(l=>l.teacher===id&&l.status==='Completed'&&lessonRate(l)===undefined).length;
 const initials=name=>name.split(' ').map(x=>x[0]).slice(0,2).join('');
 const avatar=name=>`<span class="avatar">${esc(initials(name))}</span>`;
 const badge=(text,type=text)=>`<span class="badge ${esc(type.toLowerCase())}">${esc(text)}</span>`;
@@ -27,8 +31,66 @@ const icons={overview:'<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="1
 const icon=k=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[k]}</svg>`;
 const titles={overview:'Overview',schedule:'Lesson schedule',students:'Students',teachers:'Teachers',invoices:'Invoices',salary:'Hours & salary'};
 function notify(message){$('#toast').textContent=message;$('#toast').style.display='block';clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').style.display='none',3500)}
-function save(){try{localStorage.setItem('musicstar-v2',JSON.stringify(db))}catch{notify('Browser storage is unavailable. Changes will last for this session.')}render()}
-function render(){if(!director()&&['teachers','salary'].includes(page))page='overview';$('#nav').innerHTML=Object.entries(titles).filter(([k])=>director()||!['teachers','salary'].includes(k)).map(([k,v])=>`<button data-page="${k}" class="${page===k?'active':''}">${icon(k)}${v}</button>`).join('');$('#session').innerHTML='<option value="director">Olivia Reed · Director</option>'+db.teachers.map(t=>`<option value="${t.id}">${esc(t.name)} · Teacher</option>`).join('');$('#session').value=session;const name=director()?'Olivia Reed':teacher(session)?.name||'';$('#profile').innerHTML=avatar(name)+`<div><strong>${esc(name)}</strong><small>${director()?'School director':esc(teacher(session)?.instrument)+' teacher'}</small></div>`;$('#crumb').textContent=titles[page];$('#today').textContent=new Date().toLocaleDateString('en-NZ',{weekday:'long',day:'numeric',month:'long',year:'numeric'});$('#main').innerHTML=page==='overview'?overview():page==='schedule'?schedule():page==='students'?studentsPage():page==='teachers'?teachersPage():page==='invoices'?invoicesPage():salaryPage()}
+function render(){
+  if(!ready)return;
+  if(!director()&&['teachers','salary'].includes(page))page='overview';
+  $('#nav').innerHTML=Object.entries(titles).filter(([k])=>director()||!['teachers','salary'].includes(k)).map(([k,v])=>`<button data-page="${k}" class="${page===k?'active':''}">${icon(k)}${v}</button>`).join('');
+  $('#profile').innerHTML=avatar(account.full_name)+`<div><strong>${esc(account.full_name)}</strong><small>${director()?'School director':esc(teacher(session)?.instrument)+' teacher'}</small></div>`;
+  $('#crumb').textContent=titles[page];
+  $('#today').textContent=new Date().toLocaleDateString('en-NZ',{timeZone:'Pacific/Auckland',weekday:'long',day:'numeric',month:'long',year:'numeric'});
+  $('#main').innerHTML=page==='overview'?overview():page==='schedule'?schedule():page==='students'?studentsPage():page==='teachers'?teachersPage():page==='invoices'?invoicesPage():salaryPage();
+}
+function showAuth(message='',allowLogin=true){
+  ready=false;document.body.classList.add('signed-out');
+  $('#main').innerHTML='';$('#nav').innerHTML='';$('#profile').innerHTML='';
+  if($('#modal').open)$('#modal').close();
+  if($('#password-dialog').open)$('#password-dialog').close();
+  $('#login-form').hidden=!allowLogin;$('#auth-status').textContent=message;
+  $('#forgot-password').hidden=!allowLogin;$('#reset-request-form').hidden=true;$('#new-password-form').hidden=true;
+  $('#auth-title').textContent='Welcome back.';$('#auth-intro').textContent='Sign in to plan lessons, support your students, and keep the music going.';
+  $('#auth-signout').hidden=!authenticatedUser;
+  $('#retry-connection').hidden=!authenticatedUser;
+}
+async function acceptSession(authSession,force=false){
+  const user=authSession?.user||null;
+  if(!force&&!recovering&&ready&&user?.id===authenticatedUser?.id)return;
+  const version=++loadVersion;authenticatedUser=user;account=null;session=null;db=emptyDatabase();
+  if(!user){showAuth(authNotice||(recovering?'Your reset link is missing or has expired. Request a new link using Forgot password.':''),true);return;}
+  if(recovering){showRecoveryForm();return;}
+  showAuth('Loading your school workspace...',false);
+  try{
+    const loaded=await service.load(user.id);
+    if(version!==loadVersion)return;
+    account=loaded.profile;session=loaded.session;db=loaded.db;ready=true;
+    $('#auth-error').textContent='';$('#login-password').value='';
+    document.body.classList.remove('signed-out');render();
+  }catch(error){if(version===loadVersion)showAuth(service.errorMessage(error),false);}
+}
+async function reloadRecords(){
+  const userId=authenticatedUser?.id,version=loadVersion;
+  if(!userId)return;
+  const loaded=await service.load(userId);
+  if(version!==loadVersion||authenticatedUser?.id!==userId)return;
+  account=loaded.profile;session=loaded.session;db=loaded.db;render();
+}
+async function mutate(task,message){
+  if(writeBusy||!ready)return false;
+  writeBusy=true;const userId=authenticatedUser.id;
+  try{
+    await task();
+    if(authenticatedUser?.id!==userId)return true;
+    if($('#modal').open)$('#modal').close();
+    try{await reloadRecords();notify(message);}
+    catch(error){db=emptyDatabase();showAuth('Your change was saved, but records could not be refreshed. '+service.errorMessage(error),false);}
+    return true;
+  }catch(error){
+    if(authenticatedUser?.id===userId){
+      const message=service.errorMessage(error);
+      if($('#modal').open)$('#form-error').textContent=message;else notify(message);
+    }
+    return false;
+  }finally{writeBusy=false;}
+}
 const head=(title,sub,buttons)=>`<div class="page-head"><div><h1>${title}</h1><p>${sub}</p></div><div class="head-actions">${buttons}</div></div>`;
 const add=(kind,text)=>`<button class="primary" data-add="${kind}">＋ &nbsp;${text}</button>`;
 function stats(){const lessons=visibleLessons(),invoices=visibleInvoices(),pending=invoices.filter(i=>i.status==='Pending');const values=[['Lessons today',lessons.filter(l=>l.date===today).length,'schedule','On the calendar today'],['Active students',visibleStudents().length,'students','Growing, one lesson at a time'],[director()?'Teaching hours':'My teaching hours',lessons.filter(l=>l.status==='Completed').reduce((n,l)=>n+l.duration/60,0).toFixed(1)+'h','teachers','Completed lessons · all time'],['Outstanding invoices',money(pending.reduce((n,i)=>n+i.amount,0)),'invoices',pending.length+' invoices awaiting payment']];return `<section class="stats">${values.map(([label,value,k,note])=>`<article class="stat"><div class="stat-top">${label}<span class="stat-icon">${icon(k).replace('<svg ','<svg width="17" height="17" ')}</span></div><strong>${value}</strong><small>${note}</small></article>`).join('')}</section>`}
@@ -101,12 +163,12 @@ function schedulePanel(compact){let rows=visibleLessons().filter(l=>filter==='al
 function teacherPreview(){const teachers=director()?db.teachers:db.teachers.filter(t=>t.id===session);return `<section class="panel"><div class="panel-head"><h2>${director()?'The teaching team':'Your teaching hours'}</h2><span class="badge">${teachers.length} ${director()?'teachers':'teacher'}</span></div>${teachers.slice(0,4).map(t=>`<div class="teacher-row">${avatar(t.name)}<div><strong>${esc(t.name)}</strong><small>${esc(t.instrument)} teacher</small></div><span>${hours(t.id).toFixed(1)}h</span></div>`).join('')}${director()?'<div class="panel-bottom"><button class="text-button" data-page="teachers">Meet your team ↗</button></div>':''}</section>`}
 function invoicePreview(){const list=visibleInvoices().filter(i=>i.status==='Pending');return `<section class="panel"><div class="panel-head"><h2>Awaiting payment</h2><span class="badge pending">${list.length}</span></div>${list.slice(0,3).map(i=>`<div class="invoice-preview"><div><strong>${esc(i.parent)}</strong><small>${esc(i.studentName)} · ${money(i.amount)}</small></div><button data-pdf="${i.id}">PDF ↓</button></div>`).join('')||'<div class="empty">All caught up. Lovely!</div>'}<div class="panel-bottom"><button class="text-button" data-page="invoices">View all invoices ↗</button></div></section>`}
 function studentsPage(){const list=visibleStudents().filter(s=>(s.name+' '+s.parent).toLowerCase().includes(query.toLowerCase()));return head('Every student, a rising star.','Keep student details, parent contacts, and lessons together.',add('student','Add student'))+`<section class="panel"><div class="panel-head"><h2>${director()?'All students':'My students'} <span class="badge">${visibleStudents().length}</span></h2><input id="search" placeholder="Search students…" aria-label="Search students" value="${esc(query)}"></div><div class="table-wrap"><table><thead><tr><th>Student</th><th>Instrument</th><th>Teacher</th><th>Parent / guardian</th><th>Manage</th></tr></thead><tbody>${list.map(s=>`<tr><td><div class="person">${avatar(s.name)}<div><strong>${esc(s.name)}</strong><small>${esc(s.level)}</small></div></div></td><td>${badge(teacher(s.teacher).instrument)}</td><td>${esc(teacher(s.teacher).name)}</td><td>${esc(s.parent)}<small>${esc(s.email)}</small></td><td><div class="row-actions"><button data-edit="student" data-id="${s.id}">Edit</button><button class="danger" data-delete="student" data-id="${s.id}">Delete</button></div></td></tr>`).join('')}</tbody></table>${!list.length?'<div class="empty">No students found.</div>':''}</div></section>`}
-function teachersPage(){return head('Good teachers. Great possibilities.','Manage your teaching team and their hourly rates.',add('teacher','Add teacher'))+`<div class="grid-cards">${db.teachers.map(t=>`<article class="panel teacher-card">${avatar(t.name)}<h2>${esc(t.name)}</h2>${badge(t.instrument)}<p>${esc(t.email)}</p><div class="metrics"><div><strong>${db.students.filter(s=>s.teacher===t.id).length}</strong><small>Students</small></div><div><strong>${hours(t.id).toFixed(1)}h</strong><small>Completed</small></div><div><strong>${money(t.rate)}</strong><small>Hourly rate</small></div></div><div class="row-actions"><button data-edit="teacher" data-id="${t.id}">Edit teacher</button><button class="danger" data-delete="teacher" data-id="${t.id}">Delete</button></div></article>`).join('')}</div>`}
-function invoicesPage(){return head('Simple invoices. Happy parents.','Create a parent invoice and download a PDF in a few clicks.',add('invoice','Create invoice'))+`<section class="panel"><div class="panel-head"><h2>All invoices</h2><span class="badge">${visibleInvoices().length} invoices</span></div><div class="table-wrap"><table><thead><tr><th>Invoice / student</th><th>Parent / guardian</th><th>Due date</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead><tbody>${visibleInvoices().map(i=>`<tr><td><strong>${esc(i.id)}</strong><small>${esc(i.studentName)}</small></td><td>${esc(i.parent)}<small>${esc(i.email)}</small></td><td>${esc(i.due)}</td><td><strong>${money(i.amount)}</strong></td><td>${badge(i.status)}</td><td><div class="row-actions"><button data-pdf="${i.id}">PDF ↓</button><button data-paid="${i.id}">${i.status==='Paid'?'Mark unpaid':'Mark paid'}</button><button data-delete="invoice" data-id="${i.id}" class="danger">Delete</button></div></td></tr>`).join('')}</tbody></table>${!visibleInvoices().length?'<div class="empty">Your first invoice starts here. Create one above.</div>':''}</div></section>`}
-function salaryPage(){const total=db.teachers.reduce((n,t)=>n+hours(t.id)*t.rate,0);return head('A clear view of every hour.','All-time completed lessons × current hourly rate. Estimates before deductions.','')+`<section class="stats"><article class="stat"><div class="stat-top">Total teaching hours</div><strong>${db.teachers.reduce((n,t)=>n+hours(t.id),0).toFixed(1)}h</strong><small>Completed lessons · all time</small></article><article class="stat"><div class="stat-top">Estimated gross salary</div><strong>${money(total)}</strong><small>Based on current teacher rates</small></article></section><section class="panel"><div class="panel-head"><h2>Teacher salary overview</h2></div><div class="table-wrap"><table><thead><tr><th>Teacher</th><th>Instrument</th><th>Completed hours</th><th>Hourly rate</th><th>Estimated salary</th><th>Manage</th></tr></thead><tbody>${db.teachers.map(t=>`<tr><td><div class="person">${avatar(t.name)}<strong>${esc(t.name)}</strong></div></td><td>${badge(t.instrument)}</td><td>${hours(t.id).toFixed(2)}h</td><td>${money(t.rate)}</td><td><strong>${money(hours(t.id)*t.rate)}</strong></td><td><button data-edit="teacher" data-id="${t.id}">Edit rate</button></td></tr>`).join('')}</tbody></table></div></section>`}
+function teachersPage(){return head('Good teachers. Great possibilities.','Manage your teaching team and their hourly rates.',add('teacher','Add teacher'))+`<div class="grid-cards">${db.teachers.filter(t=>t.active).map(t=>`<article class="panel teacher-card">${avatar(t.name)}<h2>${esc(t.name)}</h2>${badge(t.instrument)}<p>${esc(t.email)}</p><div class="metrics"><div><strong>${db.students.filter(s=>s.teacher===t.id).length}</strong><small>Students</small></div><div><strong>${hours(t.id).toFixed(1)}h</strong><small>Completed</small></div><div><strong>${t.rate===null?'Not set':money(t.rate)}</strong><small>Hourly rate</small></div></div><div class="row-actions"><button data-edit="teacher" data-id="${t.id}">Edit teacher</button><button class="danger" data-delete="teacher" data-id="${t.id}">Archive</button></div></article>`).join('')}</div>`}
+function invoicesPage(){return head('Simple invoices. Happy parents.','Create a parent invoice and download a PDF in a few clicks.',add('invoice','Create invoice'))+`<section class="panel"><div class="panel-head"><h2>All invoices</h2><span class="badge">${visibleInvoices().length} invoices</span></div><div class="table-wrap"><table><thead><tr><th>Invoice / student</th><th>Parent / guardian</th><th>Due date</th><th>Amount</th><th>Status</th><th>Actions</th></tr></thead><tbody>${visibleInvoices().map(i=>`<tr><td><strong>${esc(i.number||i.id)}</strong><small>${esc(i.studentName)}</small></td><td>${esc(i.parent)}<small>${esc(i.email)}</small></td><td>${esc(i.due)}</td><td><strong>${money(i.amount)}</strong></td><td>${badge(i.status)}</td><td><div class="row-actions"><button data-pdf="${i.id}">PDF ↓</button><button data-paid="${i.id}">${i.status==='Paid'?'Mark unpaid':'Mark paid'}</button><button data-delete="invoice" data-id="${i.id}" class="danger">Delete</button></div></td></tr>`).join('')}</tbody></table>${!visibleInvoices().length?'<div class="empty">Your first invoice starts here. Create one above.</div>':''}</div></section>`}
+function salaryPage(){const total=db.teachers.reduce((n,t)=>n+salary(t.id),0);return head('A clear view of every hour.','Completed lessons at the rate effective on each lesson date. Estimates before deductions.','')+`<section class="stats"><article class="stat"><div class="stat-top">Total teaching hours</div><strong>${db.teachers.reduce((n,t)=>n+hours(t.id),0).toFixed(1)}h</strong><small>Completed lessons · all time</small></article><article class="stat"><div class="stat-top">Estimated gross salary</div><strong>${money(total)}</strong><small>Uses historical hourly rates</small></article></section><section class="panel"><div class="panel-head"><h2>Teacher salary overview</h2></div><div class="table-wrap"><table><thead><tr><th>Teacher</th><th>Instrument</th><th>Completed hours</th><th>Current hourly rate</th><th>Estimated salary</th><th>Manage</th></tr></thead><tbody>${db.teachers.map(t=>`<tr><td><div class="person">${avatar(t.name)}<strong>${esc(t.name)}</strong></div></td><td>${badge(t.instrument)}</td><td>${hours(t.id).toFixed(2)}h</td><td>${t.rate===null?'Not set':money(t.rate)}</td><td><strong>${money(salary(t.id))}${missingRates(t.id)?`<small class="danger">${missingRates(t.id)} lesson(s) excluded: no rate for their date</small>`:''}</strong></td><td><button data-edit="teacher" data-id="${t.id}">Edit rate</button></td></tr>`).join('')}</tbody></table></div></section>`}
 const input=(label,name,value='',type='text',extra='')=>`<label>${label}<input name="${name}" type="${type}" value="${esc(value)}" required ${extra}></label>`;
 const select=(label,name,options,value)=>`<label>${label}<select name="${name}" required>${options.map(([id,text])=>`<option value="${esc(id)}" ${id===value?'selected':''}>${esc(text)}</option>`).join('')}</select></label>`;
-function canAccess(kind,id){if(kind==='teacher')return director();if(!id)return true;if(kind==='student')return visibleStudents().some(s=>s.id===id);if(kind==='lesson')return visibleLessons().some(l=>l.id===id);return visibleInvoices().some(i=>i.id===id)}
+function canAccess(kind,id){if(!ready)return false;if(kind==='teacher')return director();if(!id)return true;if(kind==='student')return visibleStudents().some(s=>s.id===id);if(kind==='lesson')return visibleLessons().some(l=>l.id===id);return visibleInvoices().some(i=>i.id===id)}
 // Calendar-day arithmetic keeps recurring lessons at the same local time across DST.
 function weeklyLessonDates(firstDate, count) {
   const date = new Date(firstDate + 'T12:00:00');
@@ -149,43 +211,45 @@ function updateRepeatPreview() {
   const day = new Date(date + 'T12:00:00').toLocaleDateString('en-NZ', {weekday:'long'});
   preview.textContent = `${count} lessons, every ${day}, from ${format(dates[0])} to ${format(dates[count - 1])}. Includes the first lesson. Each lesson can be edited or deleted separately.`;
 }
-function openEditor(kind,id=null){if(!canAccess(kind,id))return;editKind=kind;editId=id;const collection={student:'students',teacher:'teachers',lesson:'lessons',invoice:'invoices'}[kind],item=db[collection].find(i=>i.id===id)||{};if(['lesson','invoice'].includes(kind)&&!visibleStudents().length){notify('Add a student first.');return}if(kind==='student'&&!db.teachers.length){notify('Add a teacher first.');return}$('#editor').reset();$('#form-error').textContent='';$('#dialog-title').textContent=(id?'Edit ':'New ')+kind;let fields='';if(kind==='teacher')fields=input('Full name','name',item.name)+select('Instrument','instrument',instruments.map(i=>[i,i]),item.instrument)+input('Email','email',item.email,'email')+input('Hourly rate (NZD)','rate',item.rate??45,'number','min="0" max="10000" step="0.01"');if(kind==='student')fields=input('Student name','name',item.name)+input('Level','level',item.level||'Beginner')+input('Parent / guardian','parent',item.parent)+input('Parent email','email',item.email,'email')+(director()?select('Teacher','teacher',db.teachers.map(t=>[t.id,t.name+' · '+t.instrument]),item.teacher):'');if(kind==='lesson')fields=select('Student','student',visibleStudents().map(s=>[s.id,s.name+' · '+teacher(s.teacher).instrument]),item.student)+input('Date','date',item.date||today,'date')+input('Start time','time',item.time||'09:00','time')+input('Duration (minutes)','duration',item.duration||45,'number','min="15" max="240" step="5"')+input('Room','room',item.room||'Studio A')+select('Attendance','status',['Scheduled','Completed','Cancelled'].map(s=>[s,s]),item.status)+(id?'<p class="recurrence-note">Changes apply to this lesson only.</p>':select('Repeat','repeat',[['once','Does not repeat'],['weekly','Every week']],'once')+input('Number of lessons (including first)','weeks',10,'number','min="2" max="52" step="1"')+'<p class="recurrence-note" id="repeat-preview" aria-live="polite"></p>');if(kind==='invoice')fields=select('Student','student',visibleStudents().map(s=>[s.id,s.name]),item.student)+input('Due date','due',item.due||today,'date')+input('Amount (NZD)','amount',item.amount??180,'number','min="0.01" max="100000" step="0.01"')+input('Description','description',item.description||'Music tuition');$('#fields').innerHTML=fields;updateRepeatPreview();$('#modal').showModal()}
-$('#editor').addEventListener('submit',e=>{e.preventDefault();if(!canAccess(editKind,editId))return;const data=Object.fromEntries(new FormData(e.target));for(const key in data)data[key]=data[key].trim();if(Object.values(data).some(v=>!v)){ $('#form-error').textContent='Please complete every field.';return}const collections={student:'students',teacher:'teachers',lesson:'lessons',invoice:'invoices'},list=db[collections[editKind]],index=list.findIndex(i=>i.id===editId);if(editKind==='student'){data.teacher=director()?data.teacher:session;if(!teacher(data.teacher))return;if(index>=0&&list[index].teacher!==data.teacher&&db.lessons.some(l=>l.student===editId)){ $('#form-error').textContent='Remove this student’s existing lessons before changing their teacher.';return}}if(editKind==='teacher')data.rate=Number(data.rate);if(editKind==='lesson') {
-  if (!visibleStudents().some(s => s.id === data.student)) return;
-  data.duration = Number(data.duration);
-  const start = Number(data.time.slice(0,2)) * 60 + Number(data.time.slice(3));
-  if (!Number.isFinite(start) || !Number.isInteger(data.duration) || data.duration < 15 || data.duration > 240 || data.duration % 5 || start + data.duration > 1440) {
-    $('#form-error').textContent = 'Choose a valid duration and finish before midnight.';
-    return;
+function openEditor(kind,id=null){if(!canAccess(kind,id))return;editKind=kind;editId=id;const collection={student:'students',teacher:'teachers',lesson:'lessons',invoice:'invoices'}[kind],item=db[collection].find(i=>i.id===id)||{};if(['lesson','invoice'].includes(kind)&&!visibleStudents().length){notify('Add a student first.');return}if(kind==='student'&&!db.teachers.some(t=>t.active)){notify('Add a teacher first.');return}$('#editor').reset();$('#form-error').textContent='';$('#dialog-title').textContent=(id?'Edit ':'New ')+kind;let fields='';if(kind==='teacher')fields=input('Full name','name',item.name)+select('Instrument','instrument',instruments.map(i=>[i,i]),item.instrument)+input('Email','email',item.email,'email')+input('Hourly rate (NZD)','rate',item.rate??45,'number','min="0" max="10000" step="0.01"')+input('Rate effective from','effective',today,'date')+select('Sign-in account (optional)','userId',[['','Link later'],...db.profiles.filter(p=>p.role==='teacher'&&(p.id===item.userId||!db.teachers.some(t=>t.userId===p.id))).map(p=>[p.id,p.full_name])],item.userId||'')+'<p class="form-note">Create staff sign-in accounts in Supabase Authentication and run the teacher setup query before linking them here. Rate changes apply from the selected date. Earlier rates are kept.</p>';if(kind==='student')fields=input('Student name','name',item.name)+input('Level','level',item.level||'Beginner')+input('Parent / guardian','parent',item.parent)+input('Parent email','email',item.email,'email')+(director()?select('Teacher','teacher',db.teachers.filter(t=>t.active).map(t=>[t.id,t.name+' · '+t.instrument]),item.teacher):'');if(kind==='lesson')fields=select('Student','student',visibleStudents().map(s=>[s.id,s.name+' · '+teacher(s.teacher).instrument]),item.student)+input('Date','date',item.date||today,'date')+input('Start time','time',item.time||'09:00','time')+input('Duration (minutes)','duration',item.duration||45,'number','min="15" max="240" step="5"')+input('Room','room',item.room||'Studio A')+select('Attendance','status',['Scheduled','Completed','Cancelled'].map(s=>[s,s]),item.status)+(id?'<p class="recurrence-note">Changes apply to this lesson only.</p>':select('Repeat','repeat',[['once','Does not repeat'],['weekly','Every week']],'once')+input('Number of lessons (including first)','weeks',10,'number','min="2" max="52" step="1"')+'<p class="recurrence-note" id="repeat-preview" aria-live="polite"></p>');if(kind==='invoice')fields=select('Student','student',visibleStudents().map(s=>[s.id,s.name]),item.student)+input('Due date','due',item.due||today,'date')+input('Amount (NZD)','amount',item.amount??180,'number','min="0.01" max="100000" step="0.01"')+input('Description','description',item.description||'Music tuition');$('#fields').innerHTML=fields;const userSelect=$('#editor [name="userId"]');if(userSelect)userSelect.required=false;updateRepeatPreview();$('#modal').showModal()}
+$('#editor').addEventListener('submit',async event=>{
+  event.preventDefault();
+  if(writeBusy||!canAccess(editKind,editId))return;
+  const data=Object.fromEntries(new FormData(event.target));
+  for(const key in data)data[key]=data[key].trim();
+  $('#form-error').textContent='';
+  if(Object.entries(data).some(([key,value])=>key!=='userId'&&!value)){$('#form-error').textContent='Please complete every field.';return;}
+  if(editKind==='student'){
+    data.teacher=director()?data.teacher:session;
+    if(!teacher(data.teacher))return;
+    if(editId&&student(editId)?.teacher!==data.teacher&&db.lessons.some(l=>l.student===editId)){$('#form-error').textContent='Remove the existing lessons before assigning a different teacher.';return;}
   }
-  const repeating = !editId && data.repeat === 'weekly';
-  const count = repeating ? Number(data.weeks) : 1;
-  if (!Number.isInteger(count) || count < 1 || count > 52 || (repeating && count < 2)) {
-    $('#form-error').textContent = 'Choose between 2 and 52 weekly lessons.';
-    return;
+  if(editKind==='lesson'){
+    if(!visibleStudents().some(s=>s.id===data.student))return;
+    const start=Number(data.time.slice(0,2))*60+Number(data.time.slice(3));
+    const duration=Number(data.duration);
+    if(!Number.isInteger(duration)||duration<15||duration>240||duration%5||start+duration>1440){$('#form-error').textContent='Choose a valid duration and finish before midnight.';return;}
+    const repeating=!editId&&data.repeat==='weekly';
+    if(repeating&&data.status!=='Scheduled'){$('#form-error').textContent='New weekly lessons must have Scheduled attendance. Record completion on each individual lesson.';return;}
+    const count=repeating?Number(data.weeks):1;
+    if(!Number.isInteger(count)||count<1||count>52||(repeating&&count<2)){$('#form-error').textContent='Choose between 2 and 52 weekly lessons.';return;}
+    const conflict=weeklyLessonDates(data.date,count).find(date=>lessonConflict({...data,date,duration},editId));
+    if(conflict){$('#form-error').textContent=`A teacher, student, or room is already booked on ${conflict} at ${data.time}. No lessons were saved.`;return;}
   }
-  delete data.repeat;
-  delete data.weeks;
-  const dates = weeklyLessonDates(data.date, count);
-  const conflictDate = dates.find(date => lessonConflict({...data, date}, editId));
-  if (conflictDate) {
-    const dateLabel = new Date(conflictDate + 'T12:00:00').toLocaleDateString('en-NZ', {day:'numeric', month:'long', year:'numeric'});
-    $('#form-error').textContent = `A teacher, student, or room is already booked on ${dateLabel} at ${data.time}. ${repeating ? 'No lessons were added. Change the time, room, or number of lessons and try again.' : 'Choose another time or room.'}`;
-    return;
-  }
-  // Validate the whole series before adding any records.
-  if (repeating) {
-    const seriesId = uid();
-    list.push(...dates.map(date => ({...data, date, id:uid(), seriesId})));
-    $('#modal').close();
-    save();
-    notify(`${count} weekly lessons added.`);
-    return;
-  }
-}if(editKind==='invoice'){const s=visibleStudents().find(s=>s.id===data.student);if(!s)return;Object.assign(data,{teacher:s.teacher,studentName:s.name,parent:s.parent,email:s.email,amount:Number(data.amount),status:'Pending',issued:today})}if(index>=0)list[index]={...list[index],...data};else list.push({...data,id:editKind==='invoice'?'INV-'+Date.now():uid()});$('#modal').close();save();notify('Saved. Everything is up to date.')});
-function remove(kind,id){if(!canAccess(kind,id))return;const key={student:'students',teacher:'teachers',lesson:'lessons',invoice:'invoices'}[kind];if(kind==='teacher'&&db.students.some(s=>s.teacher===id)){notify('Reassign or remove this teacher’s students first.');return}if(!confirm(kind==='student'?'Delete this student and their lessons? Existing invoices will be kept.':`Delete this ${kind}?`))return;db[key]=db[key].filter(i=>i.id!==id);if(kind==='student')db.lessons=db.lessons.filter(l=>l.student!==id);save();notify('Deleted successfully.')}
+  const kind=editKind,id=editId,context=db;
+  const buttons=Array.from($('#editor').querySelectorAll('button'));buttons.forEach(b=>b.disabled=true);
+  try{await mutate(()=>service.save(kind,id,data,context),kind==='lesson'&&data.repeat==='weekly'?`${data.weeks} weekly lessons saved.`:'Saved to your school database.');}
+  finally{buttons.forEach(b=>b.disabled=false);}
+});
+async function remove(kind,id){
+  if(writeBusy||!canAccess(kind,id))return;
+  if(kind==='teacher'&&db.students.some(s=>s.teacher===id)){notify('Reassign or remove this teacher?s students before archiving the teacher.');return;}
+  const message=kind==='student'?'Delete this student and their lessons? Issued invoices will be kept.':kind==='teacher'?'Archive this teacher? Their sign-in access to teaching records will be removed; financial history is kept.':`Delete this ${kind}?`;
+  if(confirm(message))await mutate(()=>service.remove(kind,id),kind==='teacher'?'Teacher archived.':'Record deleted.');
+}
 // Generate a vector A4 invoice: selectable text, embedded layout, no external PDF dependency.
 function buildInvoicePdf(invoice) {
+  invoice={...invoice,id:invoice.number||invoice.id};
   const colors = {green:'0.153 0.388 0.302', ink:'0.145 0.227 0.196', muted:'0.45 0.50 0.46', line:'0.88 0.90 0.86', pale:'0.95 0.97 0.93', white:'1 1 1'};
   const clean = value => String(value ?? '').normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[\u2010-\u2015]/g,'-').replace(/[\u2018\u2019]/g,"'").replace(/[\u201c\u201d]/g,'"').replace(/[^\x20-\x7e\n]/g,'?');
   const literal = value => clean(value).replace(/[\\()]/g,'\\$&').replace(/\n/g,' ');
@@ -296,12 +360,151 @@ function pdf(id) {
   if(!invoice)return;
   const url=URL.createObjectURL(new Blob([buildInvoicePdf(invoice)],{type:'application/pdf'}));
   const link=document.createElement('a');
-  link.href=url;link.download=invoice.id+'.pdf';link.click();
+  link.href=url;link.download=(invoice.number||invoice.id)+'.pdf';link.click();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
   notify('Invoice PDF downloaded.');
 }
-document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.page){page=b.dataset.page;query='';render()}if(b.dataset.filter){filter=b.dataset.filter;render()}if(b.dataset.add)openEditor(b.dataset.add);if(b.dataset.edit)openEditor(b.dataset.edit,b.dataset.id);if(b.dataset.delete)remove(b.dataset.delete,b.dataset.id);if(b.dataset.pdf)pdf(b.dataset.pdf);if(b.dataset.paid){const i=visibleInvoices().find(i=>i.id===b.dataset.paid);if(i){i.status=i.status==='Paid'?'Pending':'Paid';save();notify('Invoice status updated.')}}});
-$('#session').addEventListener('change',e=>{session=e.target.value;teacherFilter='all';query='';$('#modal').close();render()});document.addEventListener('change',e=>{if(e.target.id==='teacher-filter'){teacherFilter=e.target.value;render()}});document.addEventListener('input',e=>{if(e.target.id==='search'){query=e.target.value;const pos=e.target.selectionStart;render();$('#search').focus();$('#search').setSelectionRange(pos,pos)}});$('#close').onclick=$('#cancel').onclick=()=>$('#modal').close();$('#modal').addEventListener('click',e=>{if(e.target===$('#modal')){const r=$('#modal').getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)$('#modal').close()}});render();
+document.addEventListener('click',event=>{
+  const button=event.target.closest('button');if(!button||!ready)return;
+  if(button.dataset.page){page=button.dataset.page;query='';render();}
+  if(button.dataset.filter){filter=button.dataset.filter;render();}
+  if(button.dataset.add)openEditor(button.dataset.add);
+  if(button.dataset.edit)openEditor(button.dataset.edit,button.dataset.id);
+  if(button.dataset.delete)remove(button.dataset.delete,button.dataset.id);
+  if(button.dataset.pdf)pdf(button.dataset.pdf);
+  if(button.dataset.paid){const invoice=visibleInvoices().find(i=>i.id===button.dataset.paid);if(invoice)mutate(()=>service.markPaid(invoice.id,invoice.status==='Paid'?'Pending':'Paid'),'Invoice status updated.');}
+});
+document.addEventListener('change',event=>{if(event.target.id==='teacher-filter'){teacherFilter=event.target.value;render();}});
+document.addEventListener('input',event=>{if(event.target.id==='search'){query=event.target.value;const pos=event.target.selectionStart;render();$('#search').focus();$('#search').setSelectionRange(pos,pos);}});
+$('#close').onclick=$('#cancel').onclick=()=>{if(!writeBusy)$('#modal').close();};
+$('#modal').addEventListener('cancel',event=>{if(writeBusy)event.preventDefault();});
+$('#modal').addEventListener('click',event=>{if(!writeBusy&&event.target===$('#modal')){const r=$('#modal').getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)$('#modal').close();}});
+$('#login-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(!service)return;
+  recovering=false;authNotice='';clearRecoveryUrl();
+  $('#auth-error').textContent='';$('#login-button').disabled=true;
+  try{
+    const result=await service.client.auth.signInWithPassword({email:$('#login-email').value.trim(),password:$('#login-password').value});
+    if(result.error)throw result.error;
+    await acceptSession(result.data.session);
+  }catch(error){$('#auth-error').textContent=service.errorMessage(error);}
+  finally{$('#login-button').disabled=false;}
+});
+async function signOut(){
+  if(!service)return;
+  recovering=false;clearPasswordFields();clearRecoveryUrl();
+  const {error}=await service.client.auth.signOut({scope:'local'});
+  if(error){notify(service.errorMessage(error));return;}
+  page='overview';query='';teacherFilter='all';await acceptSession(null,true);
+}
+$('#sign-out').onclick=$('#auth-signout').onclick=signOut;
+$('#retry-connection').onclick=async()=>{const {data,error}=await service.client.auth.getSession();if(error){showAuth(service.errorMessage(error),true);return;}acceptSession(data.session,true);};
+$('#refresh-data').onclick=async()=>{
+  const button=$('#refresh-data');button.disabled=true;
+  try{await reloadRecords();notify('School records refreshed.');}
+  catch(error){db=emptyDatabase();showAuth(service.errorMessage(error),false);}
+  finally{button.disabled=false;}
+};
+function clearPasswordFields(){
+  for(const id of ['current-password','changed-password','changed-confirm','recovery-password','recovery-confirm'])$('#'+id).value='';
+}
+function passwordError(error){
+  if(error.code==='reauthentication_needed'||error.code==='reauthentication_not_valid')return 'Please sign out and sign in again, then retry changing your password.';
+  if(error.code==='same_password')return 'Choose a password different from your current password.';
+  return service.errorMessage(error);
+}
+function validNewPassword(password,confirmation,errorElement){
+  if(password.length<8){errorElement.textContent='Use a password with at least 8 characters.';return false;}
+  if(password!==confirmation){errorElement.textContent='The new passwords do not match.';return false;}
+  return true;
+}
+function clearRecoveryUrl(){
+  const url=new URL(location.href);url.searchParams.delete('reset');history.replaceState(null,'',url.pathname+url.search+url.hash);
+}
+function resetReturnUrl(){
+  const url=new URL('./',location.href);url.searchParams.set('reset','password');return url.href;
+}
+function showRecoveryForm(){
+  showAuth('',false);
+  $('#auth-title').textContent='Set a new password.';
+  $('#auth-intro').textContent='Choose a new password for your Music Star account.';
+  $('#new-password-form').hidden=false;
+  $('#retry-connection').hidden=true;
+}
+$('#forgot-password').onclick=()=>{
+  authNotice='';
+  showAuth('',false);
+  $('#auth-title').textContent='Forgot your password?';
+  $('#auth-intro').textContent='Enter your account email and we will send you a link to reset your password.';
+  $('#reset-request-form').hidden=false;
+  $('#reset-email').value=$('#login-email').value;
+  $('#reset-request-error').textContent='';$('#reset-request-success').textContent='';
+  $('#reset-email').focus();
+};
+$('#back-to-login').onclick=()=>{recovering=false;clearRecoveryUrl();showAuth('',true);};
+$('#reset-request-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(!service)return;
+  const button=event.target.querySelector('[type="submit"]');if(button.disabled)return;
+  button.disabled=true;$('#reset-request-error').textContent='';$('#reset-request-success').textContent='';
+  try{
+    const {error}=await service.client.auth.resetPasswordForEmail($('#reset-email').value.trim(),{redirectTo:resetReturnUrl()});
+    if(error)throw error;
+    $('#reset-request-success').textContent='If an account exists for this email, a reset link has been requested. Check your inbox and spam folder.';
+  }catch(error){$('#reset-request-error').textContent=passwordError(error);}
+  finally{button.disabled=false;}
+});
+$('#change-password').onclick=()=>{
+  if(!ready||passwordBusy)return;
+  $('#change-password-form').reset();$('#password-error').textContent='';$('#password-dialog').showModal();
+};
+$('#password-close').onclick=$('#password-cancel').onclick=()=>{if(!passwordBusy){$('#password-dialog').close();clearPasswordFields();}};
+$('#password-dialog').addEventListener('cancel',event=>{if(passwordBusy)event.preventDefault();else clearPasswordFields();});
+$('#change-password-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(!ready||passwordBusy)return;
+  const password=$('#changed-password').value,confirmation=$('#changed-confirm').value,current=$('#current-password').value;
+  $('#password-error').textContent='';
+  if(!current){$('#password-error').textContent='Enter your current password.';return;}
+  if(!validNewPassword(password,confirmation,$('#password-error')))return;
+  if(password===current){$('#password-error').textContent='Choose a password different from your current password.';return;}
+  passwordBusy=true;const userId=authenticatedUser.id;
+  const buttons=[...event.target.querySelectorAll('button')];buttons.forEach(button=>button.disabled=true);
+  try{
+    const {error}=await service.client.auth.updateUser({password,current_password:current});
+    if(error)throw error;
+    if(authenticatedUser?.id===userId){$('#password-dialog').close();clearPasswordFields();notify('Your password has been updated.');}
+  }catch(error){if(authenticatedUser?.id===userId)$('#password-error').textContent=passwordError(error);}
+  finally{passwordBusy=false;buttons.forEach(button=>button.disabled=false);}
+});
+$('#new-password-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(passwordBusy||!service)return;
+  $('#recovery-error').textContent='';
+  const password=$('#recovery-password').value;
+  if(!validNewPassword(password,$('#recovery-confirm').value,$('#recovery-error')))return;
+  passwordBusy=true;const button=event.target.querySelector('[type="submit"]');button.disabled=true;
+  try{
+    const {data,error:sessionError}=await service.client.auth.getSession();
+    if(sessionError)throw sessionError;
+    if(!data.session)throw new Error('Your reset session has expired. Request a new reset link.');
+    const {error}=await service.client.auth.updateUser({password});
+    if(error)throw error;
+    recovering=false;authNotice='Your password has been updated. Sign in with your new password.';clearPasswordFields();
+    const url=new URL(location.href);url.searchParams.delete('reset');url.hash='';history.replaceState(null,'',url.pathname+url.search);
+    await signOut();
+    if(!authenticatedUser)showAuth('Your password has been updated. Sign in with your new password.',true);
+  }catch(error){$('#recovery-error').textContent=passwordError(error);}
+  finally{passwordBusy=false;button.disabled=false;}
+});
+if(!service){showAuth('The sign-in service could not load. Refresh the page or check your connection.',false);}
+else{
+  service.client.auth.onAuthStateChange((event,authSession)=>{
+    if(event==='PASSWORD_RECOVERY'){recovering=true;setTimeout(()=>acceptSession(authSession,true),0);return;}
+    if(event==='SIGNED_OUT'){recovering=false;clearPasswordFields();}
+    if(['SIGNED_OUT','SIGNED_IN','INITIAL_SESSION'].includes(event))setTimeout(()=>acceptSession(authSession),0);
+  });
+  service.client.auth.getSession().then(({data,error})=>{
+    if(error)showAuth(service.errorMessage(error),true);else acceptSession(data.session);
+  }).catch(error=>showAuth(service.errorMessage(error),true));
+}
 
 $('#editor').addEventListener('input', event => {
   if (['repeat', 'weeks', 'date'].includes(event.target.name)) updateRepeatPreview();
