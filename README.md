@@ -1,4 +1,4 @@
-# Music Star
+﻿# Music Star
 
 A responsive music-school workspace with Supabase sign-in and shared PostgreSQL data, deployable as a static Netlify site.
 
