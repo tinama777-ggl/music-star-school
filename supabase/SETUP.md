@@ -43,7 +43,11 @@ Use your actual development URL if different. Staff accounts are provisioned by 
 
 Run the whole `05-teacher-save.sql` file in SQL Editor. It adds an authenticated, director-only transactional save for a teacher record and its dated rate. It is safe to rerun. Do not rerun `01-create-database.sql`.
 
-## 7. Connect and test the app
+## 7. Use short invoice numbers
+
+For databases created before short invoice numbering was added, run the whole `06-invoice-numbering.sql` file in SQL Editor. It renames existing invoices in creation order (`INV-001`, `INV-002`, and so on) and makes future invoice numbers sequential. Fresh databases get this behavior automatically from step 1.
+
+## 8. Connect and test the app
 
 The supplied project URL and publishable key are now configured in `supabase-config.js`. The app uses real Supabase sign-in and data operations. No business records are loaded from the old demo localStorage key. Supabase still keeps the login session in browser storage.
 

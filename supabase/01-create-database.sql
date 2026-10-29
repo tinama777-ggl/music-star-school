@@ -10,6 +10,8 @@ set local search_path = public, extensions;
 create schema if not exists music_star_private;
 revoke all on schema music_star_private from public, anon, authenticated;
 grant usage on schema music_star_private to authenticated;
+create sequence public.invoice_number_seq;
+grant usage, select on sequence public.invoice_number_seq to authenticated;
 
 create table public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
@@ -87,7 +89,7 @@ create table public.lessons (
 create table public.invoices (
   id uuid primary key default gen_random_uuid(),
   invoice_number text not null unique
-    default ('INV-' || upper(replace(gen_random_uuid()::text, '-', ''))),
+    default ('INV-' || lpad(nextval('public.invoice_number_seq')::text, 3, '0')),
   student_id uuid references public.students(id) on delete set null,
   teacher_id uuid not null references public.teachers(id) on delete restrict,
   -- Snapshots keep issued invoices readable after contact changes or student deletion.
